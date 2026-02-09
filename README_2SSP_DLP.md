@@ -35,11 +35,17 @@
 ## 사용법
 
 ```bash
-# 기본 (alpha로 Attention/MLP 비율 자동 계산)
+# Qwen3-8B (기본)
+python run_2ssp_dlp.py \
+  --model Qwen/Qwen3-8B \
+  --pruning_rate 0.5 \
+  --alpha 1.5 \
+  --save_model pruned/Qwen3-8B-2ssp-dlp
+
+# LLaMA-2-7B
 python run_2ssp_dlp.py \
   --model meta-llama/Llama-2-7b-hf \
   --pruning_rate 0.5 \
-  --alpha 1.5 \
   --save_model pruned/llama2-7b-2ssp-dlp
 
 # MLP만 (Attention 제거 없음)
@@ -48,6 +54,8 @@ python run_2ssp_dlp.py --pruning_rate 0.5 --prune_attention 0
 # Attention 개수 수동 지정
 python run_2ssp_dlp.py --pruning_rate 0.5 --prune_attention 2
 ```
+
+**지원 모델**: LLaMA, Mistral, Qwen2, Qwen3, Phi3
 
 ## 코드 구조
 

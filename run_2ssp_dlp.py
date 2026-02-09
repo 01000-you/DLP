@@ -49,7 +49,8 @@ def get_calibration_data(tokenizer, nsamples=32, seqlen=2048, seed=0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-2-7b-hf")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B",
+                        help="모델 경로 (예: Qwen/Qwen3-8B, meta-llama/Llama-2-7b-hf)")
     parser.add_argument("--pruning_rate", type=float, default=0.5,
                         help="전체 목표 sparsity (0.5 = 50% 파라미터 제거)")
     parser.add_argument("--alpha", type=float, default=1.5,
@@ -68,7 +69,8 @@ def main():
     torch.manual_seed(args.seed)
 
     print("Loading model...")
-    dtype = torch.bfloat16 if "llama" in args.model.lower() else torch.float16
+    _model_lower = args.model.lower()
+    dtype = torch.bfloat16 if any(x in _model_lower for x in ("llama", "qwen", "mistral")) else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=dtype,
@@ -78,7 +80,7 @@ def main():
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, trust_remote_code=True)
     model.eval()
 
     print("Preparing calibration data...")

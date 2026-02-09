@@ -45,7 +45,7 @@ def unmaskModel(model, attnMask, mlpMask):
 
 @torch.no_grad()
 def get_mlp_hidden_state(model, calibration_sample):
-    if model.config.model_type in ("llama", "mistral", "phi3", "qwen2"):
+    if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3"):
         for i, layer in enumerate(model.model.layers):
             layer.mlp.down_proj.original_index = i
     else:
@@ -59,7 +59,7 @@ def get_mlp_hidden_state(model, calibration_sample):
 
     hooks = []
     for layer in model.model.layers:
-        last_linear = layer.mlp.down_proj if model.config.model_type in ("llama", "mistral", "phi3", "qwen2") else layer.mlp.fc2
+        last_linear = layer.mlp.down_proj if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3") else layer.mlp.fc2
         hooks.append(last_linear.register_forward_hook(lambda m, inp, out: hook(m, inp, out)))
 
     input_ids = calibration_sample.to(model.device)
@@ -78,7 +78,7 @@ def prune_mlp(model, mask, block_i):
     new_intermediate_size = preserve_mask.size(0)
     layer = model.model.layers[block_i]
 
-    if model.config.model_type in ("llama", "mistral", "qwen2"):
+    if model.config.model_type in ("llama", "mistral", "qwen2", "qwen3"):
         layer.mlp.gate_proj.weight.data = layer.mlp.gate_proj.weight.data[preserve_mask]
         layer.mlp.up_proj.weight.data = layer.mlp.up_proj.weight.data[preserve_mask]
         layer.mlp.down_proj.weight.data = layer.mlp.down_proj.weight.data[:, preserve_mask]
@@ -132,7 +132,7 @@ def second_stage_attention(model, num_prune, calibration_input_ids):
         logging.debug(f"[Attention] Best to prune: {best_to_prune} ({best_ppl})")
         attnMask[best_to_prune] = 1
 
-        if model.config.model_type in ("llama", "mistral", "qwen2"):
+        if model.config.model_type in ("llama", "mistral", "qwen2", "qwen3"):
             del model.model.layers[best_to_prune].self_attn.q_proj
             del model.model.layers[best_to_prune].self_attn.k_proj
             del model.model.layers[best_to_prune].self_attn.v_proj

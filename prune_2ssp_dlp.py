@@ -28,7 +28,7 @@ def get_mlp_hidden_state_batch(model, calibration_samples, device):
     hidden_states_list = {}  # layer_idx -> list of tensors
     
     for sample in calibration_samples:
-        if model.config.model_type in ("llama", "mistral", "phi3", "qwen2"):
+        if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3"):
             for i, layer in enumerate(model.model.layers):
                 layer.mlp.down_proj.original_index = i
         else:
@@ -42,7 +42,7 @@ def get_mlp_hidden_state_batch(model, calibration_samples, device):
 
         hooks = []
         for layer in model.model.layers:
-            if model.config.model_type in ("llama", "mistral", "phi3", "qwen2"):
+            if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3"):
                 last_linear = layer.mlp.down_proj
             else:
                 last_linear = layer.mlp.fc2
