@@ -55,6 +55,7 @@ python run_2ssp_dlp.py --pruning_rate 0.5 --prune_attention 2
   - `get_dlp_ratios_2ssp()`: 2SSP L2 norm 기반 레이어별 비율
   - `prune_mlp_2ssp_dlp()`: 2SSP+DLP 결합 MLP 채널 프루닝
 - `run_2ssp_dlp.py`: 실행 스크립트
+- `_2ssp_src/`: 2SSP 유틸 내장 (서브모듈 없이 단일 repo)
 
 ## 2SSP vs DLP vs 결합
 
