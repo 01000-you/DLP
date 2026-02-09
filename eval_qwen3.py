@@ -9,8 +9,12 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from datautils import get_loaders
-from qwen3_2ssp_dlp import register_qwen3_2ssp_dlp
 from modelutils import DEV
+from qwen3_2ssp_dlp import (
+    Qwen3Config2SSPDLP,
+    Qwen3ForCausalLM2SSPDLP,
+    register_qwen3_2ssp_dlp,
+)
 
 
 def eval_model(model, testenc, dev, seqlen, dataset_name=""):
@@ -165,9 +169,20 @@ def main():
     register_qwen3_2ssp_dlp()
     dev = DEV
     print(f"Loading model from {args.model_path}...")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path, torch_dtype="auto", trust_remote_code=True
-    )
+    config = Qwen3Config2SSPDLP.from_pretrained(args.model_path)
+    if config.model_type == "qwen3_2ssp_dlp" and getattr(
+        config, "intermediate_size_per_layer", None
+    ):
+        model = Qwen3ForCausalLM2SSPDLP.from_pretrained(
+            args.model_path,
+            config=config,
+            torch_dtype="auto",
+            trust_remote_code=True,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path, torch_dtype="auto", trust_remote_code=True
+        )
     model.eval()
     model.seqlen = getattr(model.config, "max_position_embeddings", args.seqlen)
 

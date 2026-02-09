@@ -20,8 +20,9 @@ def maskModel(model, attnMask, mlpMask):
                 def identity_forward(self, hidden_states: torch.Tensor, *args, **kwargs):
                     return torch.zeros_like(hidden_states), None, None
             else:
+                # LLaMA/Mistral/Qwen2/Qwen3: self_attn returns (attn_output, attn_weights) - 2 values
                 def identity_forward(self, hidden_states: torch.Tensor, *args, **kwargs):
-                    return 0, None, None
+                    return torch.zeros_like(hidden_states), None
             model.model.layers[i].self_attn.forward_bak = model.model.layers[i].self_attn.forward
             model.model.layers[i].self_attn.forward = MethodType(identity_forward, model.model.layers[i].self_attn)
         elif attnMask[i] == 0 and mlpMask[i] == 1:

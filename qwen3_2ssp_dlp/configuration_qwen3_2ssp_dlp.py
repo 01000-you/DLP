@@ -18,3 +18,9 @@ class Qwen3Config2SSPDLP(Qwen3Config):
     ):
         super().__init__(**kwargs)
         self.intermediate_size_per_layer = intermediate_size_per_layer
+
+    def to_dict(self):
+        d = super().to_dict()
+        if self.intermediate_size_per_layer is not None:
+            d["intermediate_size_per_layer"] = self.intermediate_size_per_layer
+        return d
