@@ -4,17 +4,19 @@
 - 레이어별 sparsity: DLP의 layer-wise 비율 조정 - 각 레이어마다 다른 sparsity
 """
 
-import sys
 import os
+import sys
 import torch
 import numpy as np
 from tqdm import tqdm
 
-# 2SSP 경로 추가 (root에서 실행 시)
-_2ssp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '2SSP')
-if _2ssp_path not in sys.path:
-    sys.path.insert(0, _2ssp_path)
-from src.utilities import get_mlp_hidden_state, prune_mlp
+# 2SSP 유틸 (내장)
+
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+if _this_dir not in sys.path:
+    sys.path.insert(0, _this_dir)
+
+from _2ssp_src.utilities import get_mlp_hidden_state, prune_mlp
 
 
 def get_mlp_hidden_state_batch(model, calibration_samples, device):
@@ -195,7 +197,7 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     model.config.intermediate_size = min(num_preserve_per_layer)
 
     if num_attn_submodules_to_prune > 0:
-        from src.utilities import second_stage_attention, maskModel  # noqa: F811
+        from _2ssp_src.utilities import second_stage_attention, maskModel
         calibration_input_ids = torch.cat(calibration_dataset[:1], dim=1)
         attnMask, mlpMask = second_stage_attention(
             model, num_prune=num_attn_submodules_to_prune,
