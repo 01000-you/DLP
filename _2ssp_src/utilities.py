@@ -1,6 +1,8 @@
 """2SSP utilities - embedded for 2SSP+DLP integration"""
 import logging
 import torch
+
+log = logging.getLogger(__name__)
 from types import MethodType
 from tqdm import tqdm
 from .evaluation import evaluate_perplexity
@@ -45,7 +47,7 @@ def unmaskModel(model, attnMask, mlpMask):
 
 @torch.no_grad()
 def get_mlp_hidden_state(model, calibration_sample):
-    if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3"):
+    if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3", "qwen3_2ssp_dlp"):
         for i, layer in enumerate(model.model.layers):
             layer.mlp.down_proj.original_index = i
     else:
@@ -59,7 +61,7 @@ def get_mlp_hidden_state(model, calibration_sample):
 
     hooks = []
     for layer in model.model.layers:
-        last_linear = layer.mlp.down_proj if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3") else layer.mlp.fc2
+        last_linear = layer.mlp.down_proj if model.config.model_type in ("llama", "mistral", "phi3", "qwen2", "qwen3", "qwen3_2ssp_dlp") else layer.mlp.fc2
         hooks.append(last_linear.register_forward_hook(lambda m, inp, out: hook(m, inp, out)))
 
     input_ids = calibration_sample.to(model.device)
@@ -78,7 +80,7 @@ def prune_mlp(model, mask, block_i):
     new_intermediate_size = preserve_mask.size(0)
     layer = model.model.layers[block_i]
 
-    if model.config.model_type in ("llama", "mistral", "qwen2", "qwen3"):
+    if model.config.model_type in ("llama", "mistral", "qwen2", "qwen3", "qwen3_2ssp_dlp"):
         layer.mlp.gate_proj.weight.data = layer.mlp.gate_proj.weight.data[preserve_mask]
         layer.mlp.up_proj.weight.data = layer.mlp.up_proj.weight.data[preserve_mask]
         layer.mlp.down_proj.weight.data = layer.mlp.down_proj.weight.data[:, preserve_mask]
@@ -110,9 +112,9 @@ def second_stage_attention(model, num_prune, calibration_input_ids):
     mlpMask = [0] * num_blocks
 
     ppl = evaluate_perplexity(model, calibration_input_ids, seq_len=2048, enable_tqdm=False)
-    logging.debug(f"Original perplexity: {ppl}")
+    log.info(f"    Original perplexity: {ppl:.4f}")
 
-    for _ in tqdm(range(num_prune), desc="Second stage"):
+    for step in tqdm(range(num_prune), desc="    Attention pruning"):
         best_to_prune = None
         best_ppl = float("inf")
 
@@ -122,17 +124,17 @@ def second_stage_attention(model, num_prune, calibration_input_ids):
             attnMask[to_prune] = 1
             maskModel(model, attnMask=attnMask, mlpMask=mlpMask)
             ppl = evaluate_perplexity(model, calibration_input_ids, seq_len=2048, enable_tqdm=False)
-            logging.debug(f"[Attention] When pruning {to_prune} perplexity is {ppl}")
+            log.debug(f"[Attention] When pruning {to_prune} perplexity is {ppl}")
             if ppl < best_ppl:
                 best_ppl = ppl
                 best_to_prune = to_prune
             unmaskModel(model, attnMask=attnMask, mlpMask=mlpMask)
             attnMask[to_prune] = 0
 
-        logging.debug(f"[Attention] Best to prune: {best_to_prune} ({best_ppl})")
+        log.info(f"      prune #{step+1}: layer {best_to_prune} 제거 (ppl={best_ppl:.4f})")
         attnMask[best_to_prune] = 1
 
-        if model.config.model_type in ("llama", "mistral", "qwen2", "qwen3"):
+        if model.config.model_type in ("llama", "mistral", "qwen2", "qwen3", "qwen3_2ssp_dlp"):
             del model.model.layers[best_to_prune].self_attn.q_proj
             del model.model.layers[best_to_prune].self_attn.k_proj
             del model.model.layers[best_to_prune].self_attn.v_proj

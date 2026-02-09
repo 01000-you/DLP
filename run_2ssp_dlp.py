@@ -5,8 +5,10 @@
 """
 
 import argparse
+import logging
 import os
 import sys
+import time
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -14,6 +16,18 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 # 프로젝트 루트
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
+
+# qwen3_2ssp_dlp 커스텀 모델 등록 (저장된 프루닝 모델 로딩용)
+from qwen3_2ssp_dlp import register_qwen3_2ssp_dlp
+register_qwen3_2ssp_dlp()
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 def get_calibration_data(tokenizer, nsamples=32, seqlen=2048, seed=0):
     """2SSP 스타일 calibration 데이터 생성 (C4 또는 wikitext)"""
@@ -28,8 +42,10 @@ def get_calibration_data(tokenizer, nsamples=32, seqlen=2048, seed=0):
             data_files={"train": "en/c4-train.00000-of-01024.json.gz"},
             split="train",
         )
+        log.info("  데이터셋: C4")
     except Exception:
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        log.info("  데이터셋: WikiText-2 (C4 fallback)")
 
     random = __import__("random")
     random.seed(seed)
@@ -68,9 +84,19 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    print("Loading model...")
+    log.info("=" * 60)
+    log.info("2SSP + DLP Pruning 시작")
+    log.info("=" * 60)
+    log.info(f"모델: {args.model}")
+    log.info(f"pruning_rate: {args.pruning_rate}, alpha: {args.alpha}, alpha_dlp: {args.alpha_dlp}")
+    log.info(f"nsamples: {args.nsamples}, seed: {args.seed}")
+
+    log.info("-" * 60)
+    log.info("[1/4] 모델 로딩 중...")
+    t0 = time.time()
     _model_lower = args.model.lower()
     dtype = torch.bfloat16 if any(x in _model_lower for x in ("llama", "qwen", "mistral")) else torch.float16
+    log.info(f"  dtype: {dtype}")
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=dtype,
@@ -82,13 +108,20 @@ def main():
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False, trust_remote_code=True)
     model.eval()
+    total_params = sum(p.numel() for p in model.parameters())
+    log.info(f"  모델 로딩 완료 ({total_params/1e9:.2f}B params, {time.time()-t0:.1f}s)")
 
-    print("Preparing calibration data...")
+    log.info("-" * 60)
+    log.info("[2/4] Calibration 데이터 준비 중...")
+    t0 = time.time()
     calibration_dataset = get_calibration_data(
         tokenizer, nsamples=args.nsamples, seqlen=2048, seed=args.seed
     )
+    log.info(f"  샘플 수: {len(calibration_dataset)}, seq_len: 2048 ({time.time()-t0:.1f}s)")
 
-    print("Running 2SSP+DLP pruning...")
+    log.info("-" * 60)
+    log.info("[3/4] 2SSP+DLP 프루닝 실행 중...")
+    t0 = time.time()
     from prune_2ssp_dlp import prune_mlp_2ssp_dlp
     model = prune_mlp_2ssp_dlp(
         model,
@@ -98,14 +131,21 @@ def main():
         alpha_dlp=args.alpha_dlp,
         num_attn_submodules_to_prune=args.prune_attention,
     )
+    log.info(f"  프루닝 완료 ({time.time()-t0:.1f}s)")
 
     if args.save_model:
+        log.info("-" * 60)
+        log.info("[4/4] 모델 저장 중...")
+        t0 = time.time()
         os.makedirs(args.save_model, exist_ok=True)
         model.save_pretrained(args.save_model)
         tokenizer.save_pretrained(args.save_model)
-        print(f"Model saved to {args.save_model}")
+        log.info(f"  저장 완료: {args.save_model} ({time.time()-t0:.1f}s)")
+    else:
+        log.info("[4/4] 저장 생략 (--save_model 미지정)")
 
-    print("Done.")
+    log.info("=" * 60)
+    log.info("완료")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,14 @@
 - 레이어별 sparsity: DLP의 layer-wise 비율 조정 - 각 레이어마다 다른 sparsity
 """
 
+import logging
 import os
 import sys
 import torch
 import numpy as np
 from tqdm import tqdm
+
+log = logging.getLogger(__name__)
 
 # 2SSP 유틸 (내장)
 
@@ -99,6 +102,8 @@ def get_dlp_ratios_2ssp(model, calibration_dataset, sparsity_ratio, alpha_dlp=0.
 
     # DLP 방식: ratio_conn = 1 - layer/total (덜 중요 = 높은 ratio = 더 많이 prune)
     total_conn = sum(layer_score)
+    if total_conn < 1e-8:
+        total_conn = 1.0  # Avoid division by zero
     ratio_conn = [1 - ls / total_conn for ls in layer_score]
 
     imp_ratios = torch.tensor(ratio_conn)
@@ -109,6 +114,11 @@ def get_dlp_ratios_2ssp(model, calibration_dataset, sparsity_ratio, alpha_dlp=0.
     else:
         scaled_ratios = (imp_ratios - min_ratio) * (1 / (max_ratio - min_ratio) * alpha_dlp * 2)
     all_layer_ratio = (scaled_ratios - torch.mean(scaled_ratios) + (1 - sparsity_ratio)).tolist()
+    
+    # Check for NaN values and replace with defaults
+    all_layer_ratio = [float(r) if not (isinstance(r, float) and (r != r)) else (1 - sparsity_ratio) for r in all_layer_ratio]
+
+    log.info(f"    layer_score 범위: {min(layer_score):.4f} ~ {max(layer_score):.4f}, imp_ratio 범위: {min(all_layer_ratio):.4f} ~ {max(all_layer_ratio):.4f}")
 
     return all_layer_ratio, average_norms
 
@@ -128,17 +138,21 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     num_blocks = len(layers)
     mlp_hidden_size = model.config.intermediate_size
 
-    # 파라미터 수
+    log.info("  [Stage 0] 모델 구조 분석")
     main_model_total_params = sum(p.numel() for p in model.model.layers.parameters())
     attn_total_params = sum(p.numel() for p in model.model.layers[0].self_attn.parameters())
     mlp_total_params = sum(p.numel() for p in model.model.layers[0].mlp.parameters())
+    log.info(f"    layers: {num_blocks}, hidden: {model.config.hidden_size}, intermediate: {mlp_hidden_size}")
+    log.info(f"    params - total: {main_model_total_params/1e6:.2f}M, attn/layer: {attn_total_params/1e6:.2f}M, mlp/layer: {mlp_total_params/1e6:.2f}M")
 
     # 1. Attention vs MLP 비율 (alpha로 조정)
+    log.info("  [Stage 1] Attention vs MLP 비율 계산 (alpha)")
     if num_attn_submodules_to_prune is None:
         num_attn_submodules_to_prune = round(
             num_blocks * pow(pruning_rate, (mlp_total_params / attn_total_params) / alpha)
         )
     num_attn_submodules_to_prune = max(0, min(num_attn_submodules_to_prune, num_blocks))
+    log.info(f"    num_attn_to_prune: {num_attn_submodules_to_prune} (alpha={alpha})")
 
     # 2. 전체 목표에 맞춰 MLP에서 제거할 파라미터 수
     parameters_pruned_for_attention = num_attn_submodules_to_prune * attn_total_params
@@ -146,20 +160,26 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     total_mlp_params_to_prune = target_parameters_to_prune - parameters_pruned_for_attention
     total_mlp_params_to_prune = max(0, total_mlp_params_to_prune)
 
-    # MLP 채널당 파라미터 (gate + up + down의 한 행/열)
     params_per_channel = 3 * model.config.hidden_size
     total_channels_to_prune = int(total_mlp_params_to_prune / params_per_channel)
     total_channels_to_prune = min(total_channels_to_prune, num_blocks * mlp_hidden_size - num_blocks)
 
+    log.info(f"    target_prune: {target_parameters_to_prune/1e6:.2f}M, attn_prune: {parameters_pruned_for_attention/1e6:.2f}M, mlp_prune: {total_mlp_params_to_prune/1e6:.2f}M")
+    log.info(f"    total_channels_to_prune: {total_channels_to_prune}")
+
     # 3. DLP 스타일 레이어별 비율 + 2SSP L2 norm 계산
+    log.info("  [Stage 2] DLP 레이어별 비율 + 2SSP L2 norm 계산")
     imp_ratios, average_norms = get_dlp_ratios_2ssp(
         model, calibration_dataset, total_channels_to_prune / (num_blocks * mlp_hidden_size), alpha_dlp
     )
 
     # 4. DLP 비율로 레이어별 채널 제거량 분배 (덜 중요한 레이어 = 더 많이 prune)
+    log.info("  [Stage 3] 레이어별 채널 제거량 분배 (DLP 비율)")
     prune_weights = [1 - r for r in imp_ratios]
+    # Check for NaN in prune_weights
+    prune_weights = [w if not (isinstance(w, float) and (w != w)) else 1.0 for w in prune_weights]
     total_weight = sum(prune_weights)
-    if total_weight < 1e-8:
+    if total_weight < 1e-8 or total_weight != total_weight:  # Check for small or NaN
         prune_weights = [1.0 / num_blocks] * num_blocks
         total_weight = 1.0
     num_prune_per_layer = [
@@ -186,7 +206,14 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
         for n in num_prune_per_layer
     ]
 
+    log.info(f"    레이어별 preserve: min={min(num_preserve_per_layer)}, max={max(num_preserve_per_layer)}, mean={np.mean(num_preserve_per_layer):.0f}")
+    for i in range(min(5, num_blocks)):
+        log.info(f"      layer {i}: preserve={num_preserve_per_layer[i]}, prune={num_prune_per_layer[i]}")
+    if num_blocks > 5:
+        log.info(f"      ... (총 {num_blocks} layers)")
+
     # 6. 2SSP 기준으로 채널 선택 (L2 norm 상위 채널 보존)
+    log.info("  [Stage 4] MLP 채널 프루닝 (2SSP L2 norm 기준)")
     for li in tqdm(range(num_blocks), desc="Pruning MLP (2SSP+DLP)"):
         num_preserve = num_preserve_per_layer[li]
         _, top_indices = torch.topk(average_norms[li], num_preserve)
@@ -194,9 +221,16 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
         mask[top_indices] = 0
         prune_mlp(model, mask, li)
 
+    # config 갱신: per-layer intermediate_size + 호환용 intermediate_size
     model.config.intermediate_size = min(num_preserve_per_layer)
+    if model.config.model_type == "qwen3":
+        model.config.intermediate_size_per_layer = num_preserve_per_layer.copy()
+        model.config.model_type = "qwen3_2ssp_dlp"
+    pruned_params = sum((mlp_hidden_size - n) * params_per_channel for n in num_preserve_per_layer)
+    log.info(f"    MLP 채널 프루닝 완료 (제거 파라미터: {pruned_params/1e6:.2f}M)")
 
     if num_attn_submodules_to_prune > 0:
+        log.info(f"  [Stage 5] Attention 서브모듈 제거 ({num_attn_submodules_to_prune}개)")
         from _2ssp_src.utilities import second_stage_attention, maskModel
         calibration_input_ids = torch.cat(calibration_dataset[:1], dim=1)
         attnMask, mlpMask = second_stage_attention(
@@ -204,6 +238,12 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
             calibration_input_ids=calibration_input_ids
         )
         maskModel(model, attnMask=attnMask, mlpMask=mlpMask)
+        log.info(f"    Attention 제거 완료 (제거 파라미터: {num_attn_submodules_to_prune * attn_total_params/1e6:.2f}M)")
+    else:
+        log.info("  [Stage 5] Attention 제거 생략 (prune_attention=0)")
+
+    final_params = sum(p.numel() for p in model.parameters())
+    log.info(f"  최종 파라미터: {final_params/1e6:.2f}M (원본 대비 {100*final_params/main_model_total_params:.1f}%)")
 
     return model
 
