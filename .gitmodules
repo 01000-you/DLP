@@ -1,0 +1,3 @@
+[submodule "2SSP"]
+	path = 2SSP
+	url = https://github.com/FabrizioSandri/2SSP.git
