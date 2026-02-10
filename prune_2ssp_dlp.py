@@ -163,6 +163,8 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     params_per_channel = 3 * model.config.hidden_size
     total_channels_to_prune = int(total_mlp_params_to_prune / params_per_channel)
     total_channels_to_prune = min(total_channels_to_prune, num_blocks * mlp_hidden_size - num_blocks)
+    if alpha_dlp == 0:
+        total_channels_to_prune = (total_channels_to_prune // num_blocks) * num_blocks
 
     log.info(f"    target_prune: {target_parameters_to_prune/1e6:.2f}M, attn_prune: {parameters_pruned_for_attention/1e6:.2f}M, mlp_prune: {total_mlp_params_to_prune/1e6:.2f}M")
     log.info(f"    total_channels_to_prune: {total_channels_to_prune}")
