@@ -186,18 +186,30 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
         int(round(total_channels_to_prune * w / total_weight))
         for w in prune_weights
     ]
-    # 정수 반올림 보정
+    # 정수 반올림 보정 (round-robin으로 분배해 alpha_dlp=0일 때도 레이어 균등 유지)
     diff = total_channels_to_prune - sum(num_prune_per_layer)
     if diff > 0:
-        for _ in range(diff):
-            idx = np.argmax(num_prune_per_layer)
+        for i in range(diff):
+            idx = i % num_blocks
             if num_prune_per_layer[idx] < mlp_hidden_size - 1:
                 num_prune_per_layer[idx] += 1
+            else:
+                for j in range(num_blocks):
+                    k = (i + j) % num_blocks
+                    if num_prune_per_layer[k] < mlp_hidden_size - 1:
+                        num_prune_per_layer[k] += 1
+                        break
     elif diff < 0:
-        for _ in range(-diff):
-            idx = np.argmin(num_prune_per_layer)
+        for i in range(-diff):
+            idx = i % num_blocks
             if num_prune_per_layer[idx] > 0:
                 num_prune_per_layer[idx] -= 1
+            else:
+                for j in range(num_blocks):
+                    k = (i + j) % num_blocks
+                    if num_prune_per_layer[k] > 0:
+                        num_prune_per_layer[k] -= 1
+                        break
 
     # 5. 각 레이어별 보존할 채널 수
     num_prune_per_layer = [min(n, mlp_hidden_size - 1) for n in num_prune_per_layer]
@@ -238,9 +250,13 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
             calibration_input_ids=calibration_input_ids
         )
         maskModel(model, attnMask=attnMask, mlpMask=mlpMask)
+        model.config.attention_pruned_layer_indices = [
+            i for i in range(num_blocks) if attnMask[i] == 1
+        ]
         log.info(f"    Attention 제거 완료 (제거 파라미터: {num_attn_submodules_to_prune * attn_total_params/1e6:.2f}M)")
     else:
         log.info("  [Stage 5] Attention 제거 생략 (prune_attention=0)")
+        model.config.attention_pruned_layer_indices = []
 
     final_params = sum(p.numel() for p in model.parameters())
     log.info(f"  최종 파라미터: {final_params/1e6:.2f}M (원본 대비 {100*final_params/main_model_total_params:.1f}%)")
