@@ -11,6 +11,13 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# qwen3_2ssp_dlp 저장 모델 로딩을 위해 로드 전 등록 (auto_map 3단 구분 시 오류 방지)
+try:
+    from qwen3_2ssp_dlp import register_qwen3_2ssp_dlp
+    register_qwen3_2ssp_dlp()
+except ImportError:
+    pass
+
 
 def _get_dev():
     """DEV: DLP modelutils 있으면 사용, 없으면 cuda/cpu."""

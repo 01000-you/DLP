@@ -371,9 +371,10 @@ def prune_mlp_2ssp_dlp(
     if model.config.model_type == "qwen3":
         model.config.intermediate_size_per_layer = num_preserve_per_layer.copy()
         model.config.model_type = "qwen3_2ssp_dlp"
+        # transformers는 "모듈경로.클래스명" 2부분만 허용 (점 1개). 슬래시로 경로 구분.
         model.config.auto_map = {
-            "AutoConfig": "qwen3_2ssp_dlp.configuration_qwen3_2ssp_dlp.Qwen3Config2SSPDLP",
-            "AutoModelForCausalLM": "qwen3_2ssp_dlp.modeling_qwen3_2ssp_dlp.Qwen3ForCausalLM2SSPDLP",
+            "AutoConfig": "qwen3_2ssp_dlp/configuration_qwen3_2ssp_dlp.Qwen3Config2SSPDLP",
+            "AutoModelForCausalLM": "qwen3_2ssp_dlp/modeling_qwen3_2ssp_dlp.Qwen3ForCausalLM2SSPDLP",
         }
     pruned_params = sum((mlp_hidden_size - n) * params_per_channel for n in num_preserve_per_layer)
     log.info(f"    MLP 채널 프루닝 완료 (제거 파라미터: {pruned_params/1e6:.2f}M)")
