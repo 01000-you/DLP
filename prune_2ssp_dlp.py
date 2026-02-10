@@ -20,6 +20,7 @@ if _this_dir not in sys.path:
     sys.path.insert(0, _this_dir)
 
 from _2ssp_src.utilities import get_mlp_hidden_state, prune_mlp
+from _2ssp_src.block_metrics import block_influence
 
 
 def get_mlp_hidden_state_batch(model, calibration_samples, device):
@@ -123,16 +124,137 @@ def get_dlp_ratios_2ssp(model, calibration_dataset, sparsity_ratio, alpha_dlp=0.
     return all_layer_ratio, average_norms
 
 
-def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alpha_dlp=0.15,
-                        num_attn_submodules_to_prune=None):
+@torch.no_grad()
+def _get_cfsp_layer_importances(model, calibration_dataset, device, metrics="angular"):
     """
-    2SSP + DLP 통합: 전체 목표 sparsity에서 Attention vs MLP 비율 조정 후 MLP 레이어별 프루닝
+    캘리브레이션 샘플별로 전체 forward 하며 각 레이어의 (입력, 출력)을 수집하고,
+    block_influence 합으로 레이어별 중요도 리스트 반환.
+    """
+    layers = model.model.layers
+    num_blocks = len(layers)
+    layer_importances = [0.0] * num_blocks
+
+    for sample in tqdm(calibration_dataset, desc="CFSP layer importance"):
+        layer_io = {}  # layer_idx -> (inp, out)
+
+        def make_hook(idx):
+            def hook(module, input, output):
+                inp = input[0].detach()
+                out = output[0] if isinstance(output, tuple) else output
+                out = out.detach()
+                layer_io[idx] = (inp, out)
+            return hook
+
+        hooks = []
+        for i, layer in enumerate(layers):
+            hooks.append(layer.register_forward_hook(make_hook(i)))
+
+        ids = sample.to(device)
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        _ = model(ids)
+
+        for h in hooks:
+            h.remove()
+
+        for i in range(num_blocks):
+            inp, out = layer_io[i]
+            layer_importances[i] += block_influence(inp, out, metrics=metrics).sum().cpu().item()
+
+    return layer_importances
+
+
+def get_cfsp_ratios_2ssp(
+    model,
+    calibration_dataset,
+    sparsity_ratio,
+    metrics="angular",
+    sigmoid_a=1.0,
+    device=None,
+):
+    """
+    CFSP 스타일: 레이어 입력-출력 거리(민감도)로 보존 비율 계산 + 2SSP L2 norm.
+    - layer_importances: block_influence 합 (클수록 중요한 레이어)
+    - mid 기준 정규화 후 sigmoid, every_pruning_ratios = x/avg * (1 - sparsity_ratio)
+    - 2SSP 채널 선택용 average_norms는 DLP와 동일(MLP hidden L2 norm).
+    Returns: (imp_ratios, average_norms) — get_dlp_ratios_2ssp와 동일 형식.
+    """
+    if device is None:
+        device = next(model.parameters()).device
+    num_blocks = len(model.model.layers)
+    mlp_hidden_size = model.config.intermediate_size
+
+    # 레이어별 CFSP 중요도 (입력-출력 거리)
+    layer_importances = _get_cfsp_layer_importances(
+        model, calibration_dataset, device, metrics=metrics
+    )
+
+    # 2SSP용 레이어별 채널 L2 norm (DLP와 동일)
+    average_norms = [torch.zeros(mlp_hidden_size) for _ in range(num_blocks)]
+    for sample in tqdm(calibration_dataset, desc="CFSP L2 norms"):
+        hidden_states_ci = get_mlp_hidden_state(model, sample)
+        for li in range(num_blocks):
+            hs = hidden_states_ci[li]
+            norm_li = hs.norm(dim=0, p=2)
+            average_norms[li] = average_norms[li].to(norm_li.device) + norm_li
+    for li in range(num_blocks):
+        average_norms[li] /= len(calibration_dataset)
+
+    # CFSP: mid 기준 정규화 후 sigmoid
+    mid = sum(layer_importances) / len(layer_importances)
+    normalized = [(x - mid) / 1e4 for x in layer_importances]
+
+    def sigmoid(x):
+        return 1.0 / (1.0 + np.exp(-x * sigmoid_a))
+
+    layer_weights = [sigmoid(x) for x in normalized]
+    avg = sum(layer_weights) / len(layer_weights)
+    max_score = max(layer_weights)
+
+    # max/avg * (1 - pruning_ratio) >= 1 이면 scale_factor로 조정
+    if avg > 1e-8 and max_score / avg * (1 - sparsity_ratio) >= 1:
+        scale_factor = (avg * (1 / (1 - sparsity_ratio) - 1)) / (max_score - avg + 1e-8) / 1.05
+        scale_factor = max(0.0, min(1.0, scale_factor))
+        for i in range(len(layer_weights)):
+            if layer_weights[i] > avg:
+                layer_weights[i] = avg + (layer_weights[i] - avg) * scale_factor
+            else:
+                layer_weights[i] = avg - (avg - layer_weights[i]) * scale_factor
+        avg = sum(layer_weights) / len(layer_weights)
+
+    imp_ratios = [x / avg * (1 - sparsity_ratio) for x in layer_weights]
+    imp_ratios = [
+        float(r) if not (isinstance(r, float) and (r != r)) else (1 - sparsity_ratio)
+        for r in imp_ratios
+    ]
+    log.info(
+        f"    CFSP layer_importances 범위: {min(layer_importances):.4f} ~ {max(layer_importances):.4f}, "
+        f"imp_ratio 범위: {min(imp_ratios):.4f} ~ {max(imp_ratios):.4f}"
+    )
+    return imp_ratios, average_norms
+
+
+def prune_mlp_2ssp_dlp(
+    model,
+    calibration_dataset,
+    pruning_rate,
+    alpha=1.5,
+    alpha_dlp=0.15,
+    num_attn_submodules_to_prune=None,
+    layer_sparsity_method="dlp",
+    cfsp_metrics="angular",
+    cfsp_sigmoid_a=1.0,
+):
+    """
+    2SSP + DLP/CFSP 통합: 전체 목표 sparsity에서 Attention vs MLP 비율 조정 후 MLP 레이어별 프루닝
 
     - pruning_rate: 전체 목표 sparsity (0.5 = 50% 파라미터 제거)
     - alpha: Attention vs MLP 비율 조정 (2SSP Equation 5, default 1.5)
-            alpha↑ → Attention 더 많이 제거, alpha↓ → MLP에 더 분배
-    - alpha_dlp: 레이어별 sparsity 스케일링 (DLP)
-    - num_attn_submodules_to_prune: None이면 alpha로 계산, 0이면 MLP만, >0이면 지정 개수 제거
+    - alpha_dlp: 레이어별 sparsity 스케일링 (DLP; layer_sparsity_method="dlp"일 때만 사용)
+    - num_attn_submodules_to_prune: None이면 alpha로 계산
+    - layer_sparsity_method: "dlp" | "cfsp" — 레이어별 보존 비율 결정 방식
+    - cfsp_metrics: CFSP 시 block_influence 메트릭 ("angular" | "cosine" | "mse" | "mae")
+    - cfsp_sigmoid_a: CFSP sigmoid 스케일 인자
     """
     layers = model.model.layers
     num_blocks = len(layers)
@@ -170,11 +292,19 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     log.info(f"    target_prune: {target_parameters_to_prune/1e6:.2f}M, attn_prune: {parameters_pruned_for_attention/1e6:.2f}M, mlp_prune: {total_mlp_params_to_prune/1e6:.2f}M")
     log.info(f"    total_channels_to_prune: {total_channels_to_prune}")
 
-    # 3. DLP 스타일 레이어별 비율 + 2SSP L2 norm 계산
-    log.info("  [Stage 2] DLP 레이어별 비율 + 2SSP L2 norm 계산")
-    imp_ratios, average_norms = get_dlp_ratios_2ssp(
-        model, calibration_dataset, total_channels_to_prune / (num_blocks * mlp_hidden_size), alpha_dlp
-    )
+    # 3. 레이어별 비율 + 2SSP L2 norm 계산 (DLP 또는 CFSP)
+    sparsity_ratio = total_channels_to_prune / (num_blocks * mlp_hidden_size)
+    if layer_sparsity_method == "cfsp":
+        log.info("  [Stage 2] CFSP 레이어별 비율 + 2SSP L2 norm 계산")
+        imp_ratios, average_norms = get_cfsp_ratios_2ssp(
+            model, calibration_dataset, sparsity_ratio,
+            metrics=cfsp_metrics, sigmoid_a=cfsp_sigmoid_a,
+        )
+    else:
+        log.info("  [Stage 2] DLP 레이어별 비율 + 2SSP L2 norm 계산")
+        imp_ratios, average_norms = get_dlp_ratios_2ssp(
+            model, calibration_dataset, sparsity_ratio, alpha_dlp
+        )
 
     # 4. DLP 비율로 레이어별 채널 제거량 분배 (덜 중요한 레이어 = 더 많이 prune)
     log.info("  [Stage 3] 레이어별 채널 제거량 분배 (DLP 비율)")

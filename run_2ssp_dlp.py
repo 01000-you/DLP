@@ -73,7 +73,14 @@ def main():
     parser.add_argument("--alpha", type=float, default=1.5,
                         help="Attention vs MLP 비율 조정 (2SSP, 기본 1.5)")
     parser.add_argument("--alpha_dlp", type=float, default=0.15,
-                        help="레이어별 sparsity 스케일링 (DLP)")
+                        help="레이어별 sparsity 스케일링 (DLP; --layer_sparsity=dlp 일 때)")
+    parser.add_argument("--layer_sparsity", type=str, default="dlp", choices=("dlp", "cfsp"),
+                        help="레이어별 보존 비율 결정: dlp=DLP, cfsp=CFSP(입력-출력 거리)")
+    parser.add_argument("--cfsp_metrics", type=str, default="angular",
+                        choices=("angular", "cosine", "mse", "mae"),
+                        help="CFSP block_influence 메트릭 (--layer_sparsity=cfsp 일 때)")
+    parser.add_argument("--cfsp_sigmoid_a", type=float, default=1.0,
+                        help="CFSP sigmoid 스케일 (--layer_sparsity=cfsp 일 때)")
     parser.add_argument("--nsamples", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--save_model", type=str, default=None)
@@ -89,7 +96,7 @@ def main():
     log.info("2SSP + DLP Pruning 시작")
     log.info("=" * 60)
     log.info(f"모델: {args.model}")
-    log.info(f"pruning_rate: {args.pruning_rate}, alpha: {args.alpha}, alpha_dlp: {args.alpha_dlp}")
+    log.info(f"pruning_rate: {args.pruning_rate}, alpha: {args.alpha}, layer_sparsity: {args.layer_sparsity}")
     log.info(f"nsamples: {args.nsamples}, seed: {args.seed}")
 
     log.info("-" * 60)
@@ -131,6 +138,9 @@ def main():
         alpha=args.alpha,
         alpha_dlp=args.alpha_dlp,
         num_attn_submodules_to_prune=args.prune_attention,
+        layer_sparsity_method=args.layer_sparsity,
+        cfsp_metrics=args.cfsp_metrics,
+        cfsp_sigmoid_a=args.cfsp_sigmoid_a,
     )
     log.info(f"  프루닝 완료 ({time.time()-t0:.1f}s)")
 
