@@ -1,7 +1,7 @@
 """
 저장된 프루닝 모델 로드 후 Perplexity 평가
-- run_2ssp_dlp.py --save로 저장한 모델 경로를 입력
-- qwen3_2ssp_dlp (per-layer intermediate_size) 지원
+- 모델 디렉터리만 있으면 실행 가능 (config + weight + qwen3_2ssp_dlp 패키지 포함 시)
+- trust_remote_code=True로 모델 디렉터리 내 커스텀 코드 로드
 - attention pruned 레이어: 로드 시 identity로 덮어써 랜덤 초기화 방지
 """
 import argparse
@@ -11,13 +11,38 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from datautils import get_loaders
-from modelutils import DEV
-from qwen3_2ssp_dlp import (
-    Qwen3Config2SSPDLP,
-    Qwen3ForCausalLM2SSPDLP,
-    register_qwen3_2ssp_dlp,
-)
+
+def _get_dev():
+    """DEV: DLP modelutils 있으면 사용, 없으면 cuda/cpu."""
+    try:
+        from modelutils import DEV
+        return DEV
+    except ImportError:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _get_loaders(dataset_name, nsamples, seed, model_path, seqlen):
+    """데이터 로더: DLP datautils 있으면 사용, 없으면 datasets로 fallback."""
+    try:
+        from datautils import get_loaders
+        return get_loaders(dataset_name, nsamples=nsamples, seed=seed, model=model_path, seqlen=seqlen)
+    except ImportError:
+        from datasets import load_dataset
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if "wikitext2" in dataset_name:
+            data = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        elif "ptb" in dataset_name:
+            data = load_dataset("ptb_text_only", "penn_treebank", split="test")
+        elif "c4" in dataset_name:
+            data = load_dataset("allenai/c4", data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"}, split="validation")
+        else:
+            data = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        key = "text" if "text" in data.column_names else "sentence"
+        sep = "\n\n" if "wikitext" in dataset_name or "ptb" in dataset_name else " "
+        text = sep.join(data[key])
+        enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=256 * seqlen)
+        testenc = enc.input_ids[:, : (256 * seqlen)]
+        return [], type("TestEnc", (), {"input_ids": testenc})()
 
 
 def _apply_attention_pruned_identity(model):
@@ -39,8 +64,13 @@ def _apply_attention_pruned_identity(model):
 
 def eval_model(model, testenc, dev, seqlen, dataset_name=""):
     """Layer-by-layer 평가 (메모리 효율)"""
-    testenc = testenc.input_ids
+    testenc = testenc.input_ids if hasattr(testenc, "input_ids") else testenc
+    if not isinstance(testenc, torch.Tensor):
+        testenc = torch.tensor(testenc)
     nsamples = testenc.numel() // seqlen
+    if nsamples == 0:
+        nsamples = 1
+        testenc = testenc[:, :seqlen]
 
     model.config.use_cache = False
     layers = model.model.layers
@@ -158,8 +188,12 @@ def eval_model(model, testenc, dev, seqlen, dataset_name=""):
 def eval_model_fast(model, testenc, dev, seqlen):
     """전체 모델 forward (메모리 충분할 때, 더 빠름)"""
     model = model.to(dev)
-    testenc = testenc.input_ids
+    testenc = testenc.input_ids if hasattr(testenc, "input_ids") else testenc
+    if not isinstance(testenc, torch.Tensor):
+        testenc = torch.tensor(testenc)
     nsamples = testenc.numel() // seqlen
+    if nsamples == 0:
+        nsamples = 1
 
     nlls = []
     for i in range(nsamples):
@@ -173,7 +207,7 @@ def eval_model_fast(model, testenc, dev, seqlen):
 
 def main():
     parser = argparse.ArgumentParser(description="저장된 프루닝 모델 평가")
-    parser.add_argument("model_path", type=str, default="/group-volume/y01000.you/repo/DLP/pruned/_qwen3-1.7B-base-251025-task20k-5e5-3ep", help="저장된 모델 경로 (--save로 저장한 경로)")
+    parser.add_argument("model_path", type=str, help="저장된 모델 경로 (config + weight + qwen3_2ssp_dlp 포함 디렉터리)")
     parser.add_argument(
         "--dataset",
         type=str,
@@ -186,28 +220,20 @@ def main():
     parser.add_argument("--fast", action="store_true", help="전체 모델 forward (빠름, 메모리 많이 사용)")
     args = parser.parse_args()
 
-    register_qwen3_2ssp_dlp()
-    dev = DEV
+    dev = _get_dev()
     print(f"Loading model from {args.model_path}...")
-    config = Qwen3Config2SSPDLP.from_pretrained(args.model_path)
-    if getattr(config, "intermediate_size_per_layer", None):
-        model = Qwen3ForCausalLM2SSPDLP.from_pretrained(
-            args.model_path,
-            config=config,
-            torch_dtype="auto",
-            trust_remote_code=True,
-        )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_path, torch_dtype="auto", trust_remote_code=True
-        )
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path,
+        torch_dtype="auto",
+        trust_remote_code=True,
+    )
     _apply_attention_pruned_identity(model)
     model.eval()
     model.seqlen = getattr(model.config, "max_position_embeddings", args.seqlen)
 
     print(f"Loading dataset: {args.dataset}...")
-    _, testenc = get_loaders(
-        args.dataset, nsamples=1, seed=args.seed, model=args.model_path, seqlen=args.seqlen
+    _, testenc = _get_loaders(
+        args.dataset, nsamples=1, seed=args.seed, model_path=args.model_path, seqlen=args.seqlen
     )
 
     seqlen = min(args.seqlen, model.seqlen)

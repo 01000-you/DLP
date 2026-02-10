@@ -7,6 +7,7 @@
 import argparse
 import logging
 import os
+import shutil
 import sys
 import time
 import torch
@@ -17,7 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-# qwen3_2ssp_dlp 커스텀 모델 등록 (저장된 프루닝 모델 로딩용)
+# qwen3_2ssp_dlp 커스텀 모델 등록 (프루닝 시 로딩용)
 from qwen3_2ssp_dlp import register_qwen3_2ssp_dlp
 register_qwen3_2ssp_dlp()
 
@@ -140,6 +141,12 @@ def main():
         os.makedirs(args.save_model, exist_ok=True)
         model.save_pretrained(args.save_model)
         tokenizer.save_pretrained(args.save_model)
+        if getattr(model.config, "model_type", None) == "qwen3_2ssp_dlp":
+            dst_dir = os.path.join(args.save_model, "qwen3_2ssp_dlp")
+            os.makedirs(dst_dir, exist_ok=True)
+            for name in ("__init__.py", "configuration_qwen3_2ssp_dlp.py", "modeling_qwen3_2ssp_dlp.py"):
+                shutil.copy2(os.path.join(ROOT, "qwen3_2ssp_dlp", name), os.path.join(dst_dir, name))
+            log.info(f"  qwen3_2ssp_dlp 패키지 복사됨 (모델 디렉터리만으로 로드 가능)")
         log.info(f"  저장 완료: {args.save_model} ({time.time()-t0:.1f}s)")
     else:
         log.info("[4/4] 저장 생략 (--save_model 미지정)")

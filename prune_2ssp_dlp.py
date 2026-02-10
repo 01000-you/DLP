@@ -139,11 +139,12 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     mlp_hidden_size = model.config.intermediate_size
 
     log.info("  [Stage 0] 모델 구조 분석")
+    original_total_params = sum(p.numel() for p in model.parameters())
     main_model_total_params = sum(p.numel() for p in model.model.layers.parameters())
     attn_total_params = sum(p.numel() for p in model.model.layers[0].self_attn.parameters())
     mlp_total_params = sum(p.numel() for p in model.model.layers[0].mlp.parameters())
     log.info(f"    layers: {num_blocks}, hidden: {model.config.hidden_size}, intermediate: {mlp_hidden_size}")
-    log.info(f"    params - total: {main_model_total_params/1e6:.2f}M, attn/layer: {attn_total_params/1e6:.2f}M, mlp/layer: {mlp_total_params/1e6:.2f}M")
+    log.info(f"    params - 전체(임베딩 포함): {original_total_params/1e6:.2f}M, 레이어만: {main_model_total_params/1e6:.2f}M, attn/layer: {attn_total_params/1e6:.2f}M, mlp/layer: {mlp_total_params/1e6:.2f}M")
 
     # 1. Attention vs MLP 비율 (alpha로 조정)
     log.info("  [Stage 1] Attention vs MLP 비율 계산 (alpha)")
@@ -240,6 +241,10 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
     if model.config.model_type == "qwen3":
         model.config.intermediate_size_per_layer = num_preserve_per_layer.copy()
         model.config.model_type = "qwen3_2ssp_dlp"
+        model.config.auto_map = {
+            "AutoConfig": "qwen3_2ssp_dlp.configuration_qwen3_2ssp_dlp.Qwen3Config2SSPDLP",
+            "AutoModelForCausalLM": "qwen3_2ssp_dlp.modeling_qwen3_2ssp_dlp.Qwen3ForCausalLM2SSPDLP",
+        }
     pruned_params = sum((mlp_hidden_size - n) * params_per_channel for n in num_preserve_per_layer)
     log.info(f"    MLP 채널 프루닝 완료 (제거 파라미터: {pruned_params/1e6:.2f}M)")
 
@@ -261,7 +266,7 @@ def prune_mlp_2ssp_dlp(model, calibration_dataset, pruning_rate, alpha=1.5, alph
         model.config.attention_pruned_layer_indices = []
 
     final_params = sum(p.numel() for p in model.parameters())
-    log.info(f"  최종 파라미터: {final_params/1e6:.2f}M (원본 대비 {100*final_params/main_model_total_params:.1f}%)")
+    log.info(f"  최종 파라미터: {final_params/1e6:.2f}M (원본 대비 {100*final_params/original_total_params:.1f}%)")
 
     return model
 
