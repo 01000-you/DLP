@@ -14,13 +14,18 @@ class Qwen3Config2SSPDLP(Qwen3Config):
     def __init__(
         self,
         intermediate_size_per_layer: Optional[List[int]] = None,
+        attention_pruned_layer_indices: Optional[List[int]] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.intermediate_size_per_layer = intermediate_size_per_layer
+        self.attention_pruned_layer_indices = attention_pruned_layer_indices or []
 
     def to_dict(self):
         d = super().to_dict()
         if self.intermediate_size_per_layer is not None:
             d["intermediate_size_per_layer"] = self.intermediate_size_per_layer
+        d["attention_pruned_layer_indices"] = getattr(
+            self, "attention_pruned_layer_indices", []
+        )
         return d

@@ -1,6 +1,7 @@
 """
 Qwen3 커스텀 모델: per-layer intermediate_size 지원 (2SSP+DLP 저장/로딩용)
 """
+from types import MethodType
 from typing import Optional
 
 import torch
@@ -88,6 +89,11 @@ class Qwen3Model2SSPDLP(Qwen3Model):
         )
 
 
+def _identity_attn_forward(self, hidden_states, *args, **kwargs):
+    """Attention 제거된 레이어: 통과만 (랜덤 가중치 사용 방지)."""
+    return torch.zeros_like(hidden_states), None
+
+
 class Qwen3ForCausalLM2SSPDLP(Qwen3ForCausalLM):
     """Qwen3ForCausalLM with per-layer intermediate_size (2SSP+DLP)"""
 
@@ -102,3 +108,16 @@ class Qwen3ForCausalLM2SSPDLP(Qwen3ForCausalLM):
         )
 
         self.post_init()
+        self._apply_attention_pruned_identity()
+
+    def _apply_attention_pruned_identity(self):
+        """config.attention_pruned_layer_indices에 해당하는 레이어의 attention을 identity로 교체."""
+        indices = getattr(self.config, "attention_pruned_layer_indices", None) or []
+        for i in indices:
+            if i >= len(self.model.layers):
+                continue
+            layer = self.model.layers[i]
+            if hasattr(layer, "self_attn"):
+                layer.self_attn.forward = MethodType(
+                    _identity_attn_forward, layer.self_attn
+                )

@@ -2,10 +2,9 @@
 저장된 프루닝 모델 로드 후 Perplexity 평가
 - 모델 디렉터리만 있으면 실행 가능 (config + weight + qwen3_2ssp_dlp 패키지 포함 시)
 - trust_remote_code=True로 모델 디렉터리 내 커스텀 코드 로드
-- attention pruned 레이어: 로드 시 identity로 덮어써 랜덤 초기화 방지
+- attention pruned 레이어: qwen3_2ssp_dlp 모델 __init__에서 자동으로 identity 적용
 """
 import argparse
-from types import MethodType
 
 import torch
 import torch.nn as nn
@@ -50,23 +49,6 @@ def _get_loaders(dataset_name, nsamples, seed, model_path, seqlen):
         enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=256 * seqlen)
         testenc = enc.input_ids[:, : (256 * seqlen)]
         return [], type("TestEnc", (), {"input_ids": testenc})()
-
-
-def _apply_attention_pruned_identity(model):
-    """저장 시 제거된 attention 레이어를 identity(통과)로 덮어써 랜덤 초기화가 쓰이지 않게 함."""
-    indices = getattr(model.config, "attention_pruned_layer_indices", None) or []
-    if not indices:
-        return
-    for i in indices:
-        if i >= len(model.model.layers):
-            continue
-
-        def _identity_attn(self, hidden_states, *args, **kwargs):
-            return torch.zeros_like(hidden_states), None
-
-        layer = model.model.layers[i]
-        if hasattr(layer, "self_attn"):
-            layer.self_attn.forward = MethodType(_identity_attn, layer.self_attn)
 
 
 def eval_model(model, testenc, dev, seqlen, dataset_name=""):
@@ -234,7 +216,6 @@ def main():
         torch_dtype="auto",
         trust_remote_code=True,
     )
-    _apply_attention_pruned_identity(model)
     model.eval()
     model.seqlen = getattr(model.config, "max_position_embeddings", args.seqlen)
 
